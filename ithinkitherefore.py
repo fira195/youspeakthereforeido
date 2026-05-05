@@ -6,10 +6,11 @@ from tkinter import scrolledtext
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 import numpy as np
+import pyttsx3
 import os
-import asyncio
-import edge_tts
 from rapidfuzz import process, fuzz
+import keyboard
+import time
 
 # ---------------- UI QUEUE ----------------
 ui_queue = queue.Queue()
@@ -26,18 +27,17 @@ def cmd(msg):
 def action(msg):
     ui_queue.put(("action", msg))
 
-# ---------------- TTS (EDGE FIXED) ----------------
-async def _speak_async(text):
-    voice = "en-US-AriaNeural"
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save("voice.mp3")
-    os.system("mpg123 -q voice.mp3")
+
+# ---------------- FAST TTS ----------------
+engine = pyttsx3.init()
+engine.setProperty("rate", 185)
 
 def speak(text):
-    threading.Thread(
-        target=lambda: asyncio.run(_speak_async(text)),
-        daemon=True
-    ).start()
+    def run():
+        engine.say(text)
+        engine.runAndWait()
+    threading.Thread(target=run, daemon=True).start()
+
 
 # ---------------- AUDIO DEVICE ----------------
 device_info = sd.query_devices(kind="input")
@@ -46,15 +46,14 @@ SAMPLE_RATE = int(device_info["default_samplerate"])
 
 log("SYSTEM", f"Device {DEVICE_ID} @ {SAMPLE_RATE}")
 
+
 # ---------------- VOSK ----------------
 MODEL_PATH = "vosk-model-small-en-us-0.15"
 model = Model(MODEL_PATH)
 recognizer = KaldiRecognizer(model, SAMPLE_RATE)
 
-# ---------------- STATE ----------------
-running = False
 
-# ---------------- COMMAND SET ----------------
+# ---------------- COMMANDS ----------------
 COMMANDS = {
     "open chrome": ("app", "google-chrome"),
     "open vscode": ("app", "code"),
@@ -64,44 +63,52 @@ COMMANDS = {
     "volume down": ("vol", "down"),
 }
 
-# ---------------- FUZZY ROUTER (FIX) ----------------
+
 def route(text):
     text = text.lower().strip()
 
-    best = process.extractOne(
+    match = process.extractOne(
         text,
         COMMANDS.keys(),
         scorer=fuzz.WRatio
     )
 
-    if best and best[1] > 70:
-        return COMMANDS[best[0]]
+    if match and match[1] > 70:
+        return COMMANDS[match[0]]
 
     return ("unknown", None)
 
-# ---------------- EXEC ----------------
-def execute(action_type, value):
-    if action_type == "app":
-        os.system(f"{value} &")
-        speak(f"Opening {value}")
 
-    elif action_type == "file":
-        os.system(f"xdg-open {os.path.expanduser(value)} &")
+def execute(act, val):
+    if act == "app":
+        os.system(f"{val} &")
+        speak("Opening application")
+
+    elif act == "file":
+        os.system(f"xdg-open {os.path.expanduser(val)} &")
         speak("Opening folder")
 
-    elif action_type == "vol":
-        os.system(f"amixer -q sset Master {'5%+' if value=='up' else '5%-'}")
+    elif act == "vol":
+        os.system(f"amixer -q sset Master {'5%+' if val=='up' else '5%-'}")
         speak("Done")
 
     else:
-        speak("I didn't understand that")
+        speak("Command not recognized")
 
-# ---------------- AUDIO LOOP ----------------
-def listen_loop():
+
+# ---------------- AUDIO LISTENER (SPACE HOLD ONLY) ----------------
+running = False
+
+
+def listen_once():
     global running
 
-    status("Listening...")
-    log("SYSTEM", "Audio started")
+    status("Listening (hold SPACE)...")
+    log("SYSTEM", "Recording started")
+
+    recognizer.Reset()
+
+    silent_frames = 0
 
     with sd.InputStream(
         device=DEVICE_ID,
@@ -112,17 +119,24 @@ def listen_loop():
     ) as stream:
 
         while running:
-            data, overflow = stream.read(4000)
 
+            data, overflow = stream.read(4000)
             audio = np.frombuffer(data, dtype=np.int16)
+
+            amp = np.abs(audio).mean()
+
+            # silence detection
+            if amp < 200:
+                silent_frames += 1
+            else:
+                silent_frames = 0
 
             if recognizer.AcceptWaveform(audio.tobytes()):
                 result = json.loads(recognizer.Result())
                 text = result.get("text", "").strip()
 
-                log("VOSK", f"heard: {text}")
-
                 if text:
+                    log("VOSK", f"heard: {text}")
                     cmd(text)
 
                     act, val = route(text)
@@ -130,19 +144,30 @@ def listen_loop():
 
                     execute(act, val)
 
+            # stop after pause (feels instant)
+            if silent_frames > 15:
+                break
+
     status("Idle")
+    log("SYSTEM", "Recording stopped")
+
+
+# ---------------- SPACE CONTROL ----------------
+def space_listener():
+    global running
+
+    while True:
+        keyboard.wait("space")
+
+        if not running:
+            running = True
+            threading.Thread(target=listen_once, daemon=True).start()
+
+        keyboard.wait("space up")
+        running = False
+
 
 # ---------------- UI ----------------
-def toggle():
-    global running
-    if not running:
-        running = True
-        threading.Thread(target=listen_loop, daemon=True).start()
-        btn.config(text="Stop", bg="red")
-    else:
-        running = False
-        btn.config(text="Start", bg="green")
-
 def poll():
     while not ui_queue.empty():
         t, msg = ui_queue.get()
@@ -160,43 +185,73 @@ def poll():
         elif t == "action":
             action_lbl.config(text=f"Action: {msg}")
 
-    root.after(100, poll)
+    root.after(50, poll)
 
-# ---------------- UI ----------------
+
+# ---------------- UI DESIGN (PRETTY UPGRADE) ----------------
 root = tk.Tk()
 root.title("Voice Assistant Pro")
-root.geometry("900x600")
-root.configure(bg="#0d1117")
+root.geometry("1000x650")
+root.configure(bg="#0b0f14")
 
-left = tk.Frame(root, bg="#0d1117")
-left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+# LEFT PANEL
+left = tk.Frame(root, bg="#0b0f14")
+left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-right = tk.Frame(root, bg="#0d1117")
-right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+# RIGHT PANEL
+right = tk.Frame(root, bg="#0b0f14")
+right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-box = scrolledtext.ScrolledText(left, bg="#000", fg="#00ff88")
+# LOG BOX
+box = scrolledtext.ScrolledText(
+    left,
+    bg="#05080d",
+    fg="#00ff99",
+    insertbackground="white",
+    font=("Consolas", 10)
+)
 box.pack(fill=tk.BOTH, expand=True)
 
-status_lbl = tk.Label(right, text="Idle", fg="white", bg="#0d1117", font=("Arial", 16))
-status_lbl.pack(pady=10)
+# STATUS
+status_lbl = tk.Label(
+    right,
+    text="Idle",
+    fg="white",
+    bg="#0b0f14",
+    font=("Helvetica", 18, "bold")
+)
+status_lbl.pack(pady=20)
 
-cmd_lbl = tk.Label(right, text="", fg="#00d4ff", bg="#0d1117")
+cmd_lbl = tk.Label(
+    right,
+    text="",
+    fg="#00d4ff",
+    bg="#0b0f14",
+    font=("Helvetica", 12)
+)
 cmd_lbl.pack(pady=10)
 
-action_lbl = tk.Label(right, text="", fg="#ffcc00", bg="#0d1117")
+action_lbl = tk.Label(
+    right,
+    text="",
+    fg="#ffcc00",
+    bg="#0b0f14",
+    font=("Helvetica", 12)
+)
 action_lbl.pack(pady=10)
 
-btn = tk.Button(
+info = tk.Label(
     right,
-    text="Start",
-    command=toggle,
-    bg="green",
-    fg="white",
-    font=("Arial", 14),
-    height=2,
-    width=20
+    text="Hold SPACE to speak",
+    fg="#888",
+    bg="#0b0f14",
+    font=("Helvetica", 10)
 )
-btn.pack(pady=40)
+info.pack(pady=40)
 
-root.after(100, poll)
+
+# ---------------- START THREADS ----------------
+threading.Thread(target=space_listener, daemon=True).start()
+
+root.after(50, poll)
 root.mainloop()
