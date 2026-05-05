@@ -1,0 +1,7 @@
+venv/
+*.zip
+vosk-model-*/
+__pycache__/
+*.wav
+*.mp3
+assistant.log

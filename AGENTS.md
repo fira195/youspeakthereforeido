@@ -1,0 +1,8 @@
+- Single-file Python app (no package structure, no build system).
+- Install dependencies: `pip install openai-whisper sounddevice scipy numpy pyttsx3 keyboard`
+- Run with root: `sudo python3 <script>.py` — `keyboard` library requires Linux root privileges.
+- First run downloads Whisper base model (~140MB) to `~/.cache/whisper`.
+- Push-to-talk: hold `SPACE` to record, release to process. Audio saved to `./input.wav`.
+- No tests, linting, or CI configured.
+- Add new commands in `route_command()` via `app_cmds`/`file_cmds`/`vol_cmds` dicts.
+- All app/file commands run in background with `&`.
